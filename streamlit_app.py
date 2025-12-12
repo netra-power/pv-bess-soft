@@ -1,384 +1,413 @@
-# streamlit_app.py
-# Phase 1 — Superposition PV vs Consommation
-# Remplacer entièrement le fichier existant par ce contenu.
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from pathlib import Path
-import plotly.graph_objects as go
-import plotly.express as px
 
-st.set_page_config(page_title="BESS Revenue Calculator", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Calculateur Rentabilité PV & Stockage", layout="wide")
 
-# --- Colors ---
-COLORS = {
-    "pv": "#FFEE8C",
-    "bess_charge": "#BFE3F1",
-    "bess_discharge": "#7ABAD6",
-    "load": "#FFAB72",
-    "grid_export": "#D7F4C2",
-    "grid_import": "#A8D79E",
-    "text": "#2F3A4A",
-    "grey": "#9AA0A6",
-}
 
-# --- Custom CSS to approximate the pixel look ---
-st.markdown(
-    f"""
-    <style>
-    /* Page title style */
-    .app-title {{
-        font-size: 26px;
-        font-weight: 700;
-        color: {COLORS['text']};
-        margin-bottom: 0.2rem;
-    }}
-    /* Styled info box like the screenshot */
-    .csv-box {{
-        border-radius: 12px;
-        border: 1px solid rgba(0,0,0,0.06);
-        padding: 14px;
-        background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(245,249,252,0.95));
-        box-shadow: 0 1px 3px rgba(31,45,61,0.03);
-        margin-bottom: 12px;
-    }}
-    .csv-title {{
-        font-weight: 600;
-        margin-bottom: 6px;
-    }}
-    .csv-hint {{
-        color: #6b7280;
-        font-size: 13px;
-        line-height: 1.35;
-        margin-bottom: 8px;
-    }}
-    .blue-note {{
-        background: #e8f1fa;
-        border-radius: 8px;
-        padding: 10px;
-        color: #0b5fa5;
-        margin-top: 8px;
-        margin-bottom: 8px;
-    }}
-    /* Narrow the sidebar components spacing */
-    .sidebar .stButton>button, .sidebar .stNumberInput>div, .sidebar .stSelectbox>div {{
-        margin-bottom: 8px;
-    }}
-    /* minimal padding for date input label */
-    .date-label {{ margin-bottom: 6px; }}
-    /* keep plot margins comfortable */
-    .plotly-graph-div .main-svg {{ background: white; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+def calculate_irr(investment: float, annual_cashflow: float, years: int = 20) -> float:
+    """
+    TRI interne (utilisé uniquement pour certains scores internes si besoin).
+    Retourne un taux en %.
+    """
+    if investment <= 0:
+        return 0.0
+    if annual_cashflow <= 0:
+        return -99.9
 
-# Title
-st.markdown(f"<div class='app-title'>Superposition production PV vs consommation (24h)</div>", unsafe_allow_html=True)
-st.write("Choisir un jour et un mois (année ignorée) — visualisation sur 24 heures")
+    low, high = -0.99, 10.0
+    for _ in range(100):
+        r = (low + high) / 2
+        if r == 0:
+            npv = (annual_cashflow * years) - investment
+        else:
+            factor = (1 - (1 + r) ** (-years)) / r
+            npv = annual_cashflow * factor - investment
 
-# ---------------- Sidebar: CSV + parameters (pixel-like) ----------------
-with st.sidebar:
-    st.header("Bâtiment — Consommation")
-    # Consumption CSV upload box styled with HTML wrapper for pixel look
-    st.markdown("<div class='csv-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='csv-title'>📥 Importer un fichier CSV de consommation (optionnel)</div>", unsafe_allow_html=True)
-    st.markdown("<div class='csv-hint'>Format CSV consommation attendu :</div>", unsafe_allow_html=True)
-    st.markdown("<ul style='margin-top:0.2rem; margin-left:18px; margin-bottom:6px; color:#6b7280;'>"
-                "<li>Séparateur : <code>;</code></li>"
-                "<li>Ligne 1 : (DateHeure ; Valeur)</li>"
-                "<li>Ligne 2 : unité dans la 2ème colonne → (kW) ou (kWh)</li>"
-                "<li>Données : <code>dd.mm.yyyy HH:MM ; valeur</code></li>"
-                "</ul>", unsafe_allow_html=True)
-    cons_file = st.file_uploader("Drag and drop file here", type=["csv"], key="cons_csv")
-    st.markdown("<div class='blue-note'>Aucun fichier importé — saisissez un profil type ci-dessous.</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        if abs(npv) < 0.01:
+            return r * 100
+        if npv > 0:
+            low = r
+        else:
+            high = r
+    return r * 100
 
-    st.subheader("Profil de consommation du bâtiment")
-    building_type = st.selectbox("Type de bâtiment", ["Résidentiel", "Tertiaire", "Industriel"], index=0)
-    annual_consumption_mwh = st.number_input("Consommation annuelle (MWh)", min_value=0.0, value=0.67, step=0.01, format="%.2f")
-    st.caption("La consommation saisie sert à dimensionner le profil type généré automatiquement.")
 
-    st.markdown("---")
-    st.header("Photovoltaïque")
-    st.markdown("<div class='csv-box'>", unsafe_allow_html=True)
-    st.markdown("<div class='csv-title'>☀️ Importer un fichier CSV de production (optionnel)</div>", unsafe_allow_html=True)
-    st.markdown("<div class='csv-hint'>Format CSV PV attendu :</div>", unsafe_allow_html=True)
-    st.markdown("<ul style='margin-top:0.2rem; margin-left:18px; margin-bottom:6px; color:#6b7280;'>"
-                "<li>Séparateur : <code>;</code></li>"
-                "<li>Ligne 1 : (DateHeure ; Valeur)</li>"
-                "<li>Ligne 2 : unité dans la 2ème colonne → (kW) ou (kWh)</li>"
-                "<li>Données : <code>dd.mm.yyyy HH:MM ; valeur</code></li>"
-                "</ul>", unsafe_allow_html=True)
-    pv_file = st.file_uploader("Drag and drop file here", type=["csv"], key="pv_csv")
-    st.markdown("</div>", unsafe_allow_html=True)
+def simulate_energy_flow(
+    pv: np.ndarray,
+    load: np.ndarray,
+    capacity_kwh: float,
+    power_kva: float,
+    step_hours: float = 1.0,
+    rte: float = 0.90,
+    dod: float = 1.0,
+) -> dict:
+    """
+    Simule les flux énergétiques avec pertes symétriques (sqrt(RTE) charge et décharge).
+    pv/load sont des séries d'énergie par pas (kWh par pas), pas des kW.
+    power_kva est traité comme kW max (cosphi=1) et limité en énergie par pas via power_kva*step_hours.
+    """
+    n = len(pv)
+    pv_arr = np.array(pv, dtype=float)
+    load_arr = np.array(load, dtype=float)
 
-    st.markdown("**Sinon : définir la puissance (kWc)**")
-    pv_kwc = st.number_input("Puissance installée (kWc)", min_value=0.0, value=125.0, step=1.0, format="%.1f")
-    orientation = st.selectbox("Orientation", ["Sud", "Est-Ouest"], index=0)
-    inclinaison = st.number_input("Inclinaison (°)", min_value=0, max_value=90, value=20, step=1)
+    # PV seul
+    balance = pv_arr - load_arr
+    if capacity_kwh <= 0:
+        exported = np.maximum(0.0, balance)
+        imported = np.maximum(0.0, -balance)
+        self_consumed = np.minimum(pv_arr, load_arr)
+        return {
+            "imported": float(np.sum(imported)),
+            "exported": float(np.sum(exported)),
+            "self_consumed": float(np.sum(self_consumed)),
+        }
 
-    st.markdown("---")
-    st.write("Fichiers PV templates (optionnels) :")
-    st.write("- `pvsyst_125_sud.CSV` et `pvsyst_125_est_ouest.CSV` à la racine du dépôt (chargés automatiquement si présents).")
+    # Batterie
+    useful_capacity = max(0.0, capacity_kwh * dod)  # capacité "chimique" utile
+    soc = 0.0  # kWh chimique utile
+    grid_import = 0.0
+    grid_export = 0.0
+    self_consumed_sum = 0.0
 
-# ------------------ Helpers ------------------
-def make_year_index():
-    start = datetime(2001, 1, 1, 0, 0)  # template non-leap year
-    return pd.date_range(start, periods=365*24, freq="H")
+    max_energy_per_step = max(0.0, power_kva * step_hours)  # kWh/pas
+    eff_one_way = float(np.sqrt(max(0.0, min(1.0, rte))))  # sqrt(RTE)
 
-YEAR_IDX = make_year_index()
+    for i in range(n):
+        p = pv_arr[i]
+        l = load_arr[i]
+        diff = p - l
 
-def gaussian_smooth(series, sigma_hours=2.0):
-    """Apply gaussian smoothing using convolution (sigma in hours)."""
-    if getattr(series, "empty", False):
-        return series
-    window_radius = max(1, int(sigma_hours * 3))
-    x = np.arange(-window_radius, window_radius+1)
-    sigma = sigma_hours
-    kernel = np.exp(-0.5 * (x / sigma)**2)
-    kernel = kernel / kernel.sum()
-    vals = np.convolve(series.values, kernel, mode="same")
-    return pd.Series(vals, index=series.index)
+        if diff > 0:
+            # surplus -> charge
+            power_available_ac = min(diff, max_energy_per_step)
 
-# ------------------ CSV parsing (robust) ------------------
-def parse_csv_timevalue(uploaded, sep=";"):
-    """uploaded: file-like or path string. returns hourly Series indexed to YEAR_IDX or None."""
+            space_chemical = useful_capacity - soc
+            if space_chemical <= 0:
+                ac_to_battery = 0.0
+            else:
+                max_ac_accepted = space_chemical / eff_one_way if eff_one_way > 0 else 0.0
+                ac_to_battery = min(power_available_ac, max_ac_accepted)
+
+            energy_stored = ac_to_battery * eff_one_way
+            soc += energy_stored
+
+            to_grid = diff - ac_to_battery
+            grid_export += to_grid
+
+            # charge couverte par PV (et éventuellement batterie en charge n’aide pas ici)
+            self_consumed_sum += l
+
+        else:
+            # déficit -> décharge
+            needed_ac = -diff
+            power_needed_limited = min(needed_ac, max_energy_per_step)
+
+            max_ac_provided = soc * eff_one_way
+            ac_from_battery = min(power_needed_limited, max_ac_provided)
+
+            energy_extracted = (ac_from_battery / eff_one_way) if eff_one_way > 0 else 0.0
+            soc -= energy_extracted
+            if soc < 0:
+                soc = 0.0
+
+            to_import = needed_ac - ac_from_battery
+            grid_import += to_import
+
+            self_consumed_sum += (p + ac_from_battery)
+
+    return {
+        "imported": float(grid_import),
+        "exported": float(grid_export),
+        "self_consumed": float(self_consumed_sum),
+    }
+
+
+def load_csv_data(uploaded_file) -> tuple[np.ndarray | None, float]:
+    """
+    CSV format attendu (votre format) :
+    - séparateur ; et décimale ,
+    - 2 lignes d'en-tête à ignorer (skiprows=2),
+    - valeur dans la 2e colonne (index 1).
+    Renvoie (values, step_hours), où values est un tableau de kWh par pas.
+    """
+    if uploaded_file is None:
+        return None, 1.0
+
     try:
-        if isinstance(uploaded, (str, Path)):
-            df = pd.read_csv(str(uploaded), sep=sep, header=None, engine="python", encoding="utf-8")
+        uploaded_file.seek(0)
+        df = pd.read_csv(
+            uploaded_file,
+            sep=";",
+            decimal=",",
+            skiprows=2,
+            header=None,
+            engine="python",
+        )
+        if df.shape[1] < 2:
+            uploaded_file.seek(0)
+            df = pd.read_csv(
+                uploaded_file,
+                sep=None,
+                decimal=",",
+                skiprows=2,
+                header=None,
+                engine="python",
+            )
+
+        col_idx = 1 if df.shape[1] > 1 else 0
+        values = pd.to_numeric(df.iloc[:, col_idx], errors="coerce").dropna().values.astype(float)
+
+        # Détection pas 15 min (~35040 points)
+        if len(values) > 30000:
+            step = 0.25
+            max_len = 35040 + 96
+            if len(values) > max_len:
+                values = values[:35040]
         else:
-            df = pd.read_csv(uploaded, sep=sep, header=None, engine="python", encoding="utf-8")
-    except Exception as e:
-        st.warning(f"Erreur lecture CSV: {e}")
-        return None
+            step = 1.0
+            if len(values) > 8760:
+                values = values[:8760]
 
-    if df.shape[1] < 2:
-        st.warning("Le CSV ne contient pas au moins deux colonnes.")
-        return None
-    col0 = df.iloc[:,0].astype(str)
-    col1 = pd.to_numeric(df.iloc[:,1], errors="coerce")
-    mask = col1.notna()
-    if mask.any():
-        start = mask.idxmax()
-        df2 = pd.DataFrame({"date": col0[start:].values, "val": col1[start:].values})
-    else:
-        df2 = pd.DataFrame({"date": col0.values, "val": col1.values})
+        return values, step
+    except Exception:
+        return None, 1.0
 
-    # parse dates (try multiple formats)
-    def try_parse(s):
-        for fmt in ("%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d.%m.%Y", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s, fmt)
-            except Exception:
-                continue
-        # try pandas fallback
-        try:
-            return pd.to_datetime(s, dayfirst=True, errors="coerce")
-        except Exception:
-            return pd.NaT
 
-    df2["date_parsed"] = df2["date"].apply(lambda x: try_parse(str(x)))
-    df2 = df2[df2["date_parsed"].notna()]
-    df2 = df2.dropna(subset=["val"])
-    if df2.empty:
-        st.info("Aucune donnée exploitable trouvée dans le CSV.")
-        return None
+st.title("Analyse Rentabilité PV & Stockage (Autoconsommation)")
 
-    series = df2.set_index("date_parsed")["val"].sort_index().resample("H").mean()
-    # map to template YEAR_IDX by mdh
-    mdh = series.index.strftime("%m-%d %H:%M")
-    mapping = series.groupby(mdh).median()
-    idx_mdh = YEAR_IDX.strftime("%m-%d %H:%M")
-    vals = [mapping.get(k, 0.0) for k in idx_mdh]
-    return pd.Series(vals, index=YEAR_IDX)
+col_left, col_right = st.columns([1, 2], gap="large")
 
-# ------------------ Load local templates if present ------------------
-def try_load_local_template(path):
-    path = Path(path)
-    if not path.exists():
-        return None
-    s = parse_csv_timevalue(str(path))
-    return s
+# =========================
+# Entrées
+# =========================
+with col_left:
+    st.header("1. Entrées")
 
-local_sud = try_load_local_template("pvsyst_125_sud.CSV")
-local_ew = try_load_local_template("pvsyst_125_est_ouest.CSV")
+    with st.expander("Fichiers de données", expanded=True):
+        file_load = st.file_uploader("Consommation (CSV)", type=["csv"])
+        file_pv = st.file_uploader("Production PV (CSV)", type=["csv"])
 
-# If no local template, create synthetic templates
-def pv_south_synthetic():
-    idx = YEAR_IDX
-    doy = idx.dayofyear.values
-    hour = idx.hour.values + idx.minute.values/60.0
-    seasonal = 0.45 + 0.55 * np.sin((doy - 80) / 365.0 * 2 * np.pi)
-    daily = np.maximum(0, np.cos((hour - 12)/12 * np.pi))
-    prod = daily * seasonal
-    if prod.max() > 0:
-        prod = prod / prod.max() * 125.0  # keep 125 max for template
-    return pd.Series(prod, index=idx)
+    st.markdown("---")
+    with st.expander("Paramètres Économiques", expanded=True):
+        tariff_grid_buy = st.number_input("Tarif Achat Réseau (CHF/kWh)", value=0.28, format="%.3f")
+        tariff_grid_sell = st.number_input("Tarif Rachat Surplus (CHF/kWh)", value=0.04, format="%.3f")
 
-def pv_ew_synthetic():
-    idx = YEAR_IDX
-    doy = idx.dayofyear.values
-    hour = idx.hour.values + idx.minute.values/60.0
-    seasonal = 0.45 + 0.55 * np.sin((doy - 80) / 365.0 * 2 * np.pi)
-    morning = np.maximum(0, np.cos((hour - 9)/6 * np.pi))
-    afternoon = np.maximum(0, np.cos((hour - 15)/6 * np.pi))
-    prod = (morning + afternoon) * 0.6 * seasonal
-    if prod.max() > 0:
-        prod = prod / prod.max() * 125.0
-    return pd.Series(prod, index=idx)
+    st.markdown("---")
+    with st.expander("Durée de vie", expanded=True):
+        project_lifetime_years = st.number_input(
+            "Durée de vie du projet (années)",
+            min_value=1,
+            value=20,
+            step=1,
+            format="%d",
+        )
 
-pv_south_template = local_sud if local_sud is not None else pv_south_synthetic()
-pv_ew_template = local_ew if local_ew is not None else pv_ew_synthetic()
+    st.markdown("---")
+    with st.expander("Dimensionnement & Coûts", expanded=True):
+        st.markdown("**Photovoltaïque**")
+        pv_power_kwc = st.number_input("Puissance PV (kWc)", value=100.0, format="%.0f")
+        capex_pv_kwc = st.number_input("Coût invest. PV (CHF/kWc)", value=800.0, format="%.0f")
 
-# Smooth templates (reduce artificial spikes)
-pv_south_template = gaussian_smooth(pv_south_template, sigma_hours=2.5)
-pv_ew_template = gaussian_smooth(pv_ew_template, sigma_hours=2.5)
+        st.markdown("**Stockage (BESS)**")
+        batt_capacity_kwh = st.number_input("Capacité Nominale Batterie (kWh)", value=50.0, format="%.0f")
+        batt_power_kva = st.number_input("Puissance Onduleur (kVA)", value=50.0, format="%.0f")
+        capex_batt_kwh = st.number_input("Coût invest. Stockage (CHF/kWh)", value=550.0, format="%.0f")
 
-# ------------------ Build PV timeseries (kW hourly) ------------------
-def build_pv_timeseries(pv_file, kwc, orientation, inclinaison):
-    if pv_file is not None:
-        s = parse_csv_timevalue(pv_file)
-        if s is not None:
-            s = gaussian_smooth(s, sigma_hours=2.0)
-            # if CSV provided in kWh per hour, treat as kW average over hour
-            return s
+        st.markdown("**Paramètres Techniques Batterie**")
+        batt_dod = st.slider("Profondeur de Décharge (DoD) %", min_value=50, max_value=100, value=100, step=1)
+        batt_rte = st.slider("Rendement Aller-Retour (RTE) %", min_value=70, max_value=100, value=90, step=1)
+
+        batt_dod_val = batt_dod / 100.0
+        batt_rte_val = batt_rte / 100.0
+
+    # Chargement des CSV
+    data_load = None
+    data_pv = None
+    step_h = 1.0
+
+    if file_load:
+        data_load, step_load = load_csv_data(file_load)
+    if file_pv:
+        data_pv, step_pv = load_csv_data(file_pv)
+
+    # Alignement simple
+    if data_load is not None and data_pv is not None:
+        if len(data_load) != len(data_pv):
+            st.warning("Attention : résolutions différentes. Alignement forcé sur la série la plus courte.")
+            min_len = min(len(data_load), len(data_pv))
+            data_load = data_load[:min_len]
+            data_pv = data_pv[:min_len]
+            # On prend le pas du load si présent sinon pv (approx)
+            step_h = step_load if file_load else step_pv
         else:
-            st.info("Impossible de parser le CSV PV ; utilisation du modèle template.")
-    # use template normalized per 125 kW and scale to kwc
-    if orientation == "Sud":
-        base = pv_south_template.copy()
+            step_h = step_load
+
+# =========================
+# Résultats
+# =========================
+with col_right:
+    st.header("2. Résultats de l'analyse")
+
+    if data_load is None or data_pv is None:
+        st.info("Veuillez importer vos fichiers CSV (Consommation et Production) pour lancer l'analyse.")
     else:
-        base = pv_ew_template.copy()
-    # template currently has magnitude ~125 peak; normalize per 1 kWc and multiply by kwc
-    # avoid division by zero
-    max_base = base.max() if base.max() > 0 else 1.0
-    per_kw = base / (max_base)  # normalized to 1 at peak
-    # scale so peak equals kwc * (approx peak/peak) -> use per_kw * kwc * (max_base/125) to retain absolute shape
-    # simpler: scale as per_kw * kwc * (max_base/1) -> acceptable
-    series = per_kw * kwc * (max_base / max_base)  # effectively per_kw * kwc
-    # tilt correction: -5% if inclinaison < 7°, 0% for 7-35°, -7% if >35°
-    if inclinaison < 7:
-        series = series * 0.95
-    elif inclinaison > 35:
-        series = series * 0.93
-    # smooth final
-    series = gaussian_smooth(series, sigma_hours=1.8)
-    return series
+        sim_mode = "15 minutes" if step_h == 0.25 else "Horaire"
+        st.caption(f"Mode de simulation : {sim_mode} ({len(data_load)} points)")
 
-# ------------------ Build consumption timeseries ------------------
-def load_profile_template(building="Résidentiel"):
-    h = np.arange(24)
-    if building == "Résidentiel":
-        profile = 0.6 + 0.4 * np.exp(-((h - 7) ** 2) / 10) + 0.6 * np.exp(-((h - 19) ** 2) / 12)
-    elif building == "Tertiaire":
-        profile = 0.4 + 1.2 * np.exp(-((h - 13) ** 2) / 18) * ((h >= 7) & (h <= 19))
-        profile = profile + 0.1
-    else:
-        profile = 1.0 + 0.2 * np.exp(-((h - 12) ** 2) / 60)
-    profile = profile / np.mean(profile)
-    return profile
+        total_load = float(np.sum(data_load))
+        total_pv = float(np.sum(data_pv))
 
-def make_annual_load_from_profile(building, annual_mwh):
-    total_kwh = annual_mwh * 1000.0
-    template_daily = load_profile_template(building)
-    daily_profile = np.tile(template_daily, 365)
-    doy = YEAR_IDX.dayofyear.values
-    seasonal = 1.0 + 0.08 * np.cos((doy - 200) / 365 * 2 * np.pi) if building == "Résidentiel" else 1.0
-    annual_profile = daily_profile * seasonal
-    current_sum = annual_profile.sum()
-    factor = total_kwh / current_sum if current_sum > 0 else 0.0
-    hourly_kw = annual_profile * factor
-    return pd.Series(hourly_kw, index=YEAR_IDX)
+        # --- A. PV seul
+        st.subheader("A. Photovoltaïque Seul")
 
-def build_consumption_timeseries(cons_file, building_type, annual_mwh):
-    if cons_file is not None:
-        s = parse_csv_timevalue(cons_file)
-        if s is not None:
-            s = gaussian_smooth(s, sigma_hours=1.0)
-            return s
+        res_pv = simulate_energy_flow(data_pv, data_load, 0.0, 0.0, step_hours=step_h)
+        autoconso_pv = res_pv["self_consumed"]
+        export_pv = res_pv["exported"]
+
+        taux_autoconso_pv = (autoconso_pv / total_pv * 100) if total_pv > 0 else 0.0
+        taux_autoprod_pv = (autoconso_pv / total_load * 100) if total_load > 0 else 0.0
+
+        economie_facture_pv = autoconso_pv * tariff_grid_buy
+        revenu_vente_surplus_pv = export_pv * tariff_grid_sell
+        total_gain_annuel_pv = economie_facture_pv + revenu_vente_surplus_pv
+
+        invest_pv = float(pv_power_kwc * capex_pv_kwc)
+        roi_pv = (invest_pv / total_gain_annuel_pv) if total_gain_annuel_pv > 0 else 99.0
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Consommation", f"{total_load:,.0f} kWh")
+        c2.metric("Production PV", f"{total_pv:,.0f} kWh")
+        c3.metric("Investissement PV", f"{invest_pv:,.0f} CHF")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Énergie Autoconsommée", f"{autoconso_pv:,.0f} kWh")
+        c2.metric("Taux Autoconsommation", f"{taux_autoconso_pv:.1f} %")
+        c3.metric("Taux Autoproduction", f"{taux_autoprod_pv:.1f} %")
+
+        c1, c2 = st.columns(2)
+        c1.metric("Gain Total", f"{total_gain_annuel_pv:,.0f} CHF/an")
+        c2.metric("Retour Invest.", f"{roi_pv:.1f} ans")
+
+        st.markdown("---")
+
+        # --- B. PV + batterie (scénario saisi)
+        st.subheader(f"B. Impact Stockage ({batt_capacity_kwh:.0f} kWh)")
+
+        if batt_capacity_kwh <= 0:
+            st.info("Saisissez une capacité batterie > 0 pour afficher ce bloc.")
         else:
-            st.info("Impossible de parser le CSV consommation ; utilisation du modèle synthétique.")
-    return make_annual_load_from_profile(building_type, annual_mwh)
+            res_batt = simulate_energy_flow(
+                data_pv,
+                data_load,
+                float(batt_capacity_kwh),
+                float(batt_power_kva),
+                step_hours=step_h,
+                rte=batt_rte_val,
+                dod=batt_dod_val,
+            )
 
-# ------------------ Build series ------------------
-pv_ts = build_pv_timeseries(pv_file, pv_kwc, orientation, inclinaison)
-cons_ts = build_consumption_timeseries(cons_file, building_type, annual_consumption_mwh)
+            autoconso_batt = res_batt["self_consumed"]
+            taux_autoconso_batt = (autoconso_batt / total_pv * 100) if total_pv > 0 else 0.0
+            taux_autoprod_batt = (autoconso_batt / total_load * 100) if total_load > 0 else 0.0
 
-# ------------------ Main layout: graph & controls ------------------
-st.markdown("---")
-left, right = st.columns([2.6, 1])
+            # Energie sauvée = énergie restituée utile au bâtiment (après pertes)
+            kwh_saved = autoconso_batt - autoconso_pv
 
-# Date input shown above graph area (but placed inside left column to be visually close)
-with left:
-    sel_date = st.date_input("Choisir jour et mois (année ignorée)", value=datetime(2001, 6, 21), key="sel_date")
-    month = sel_date.month
-    day = sel_date.day
+            # Gain net = achat réseau évité - manque à gagner de revente
+            gain_net_batt = (kwh_saved * tariff_grid_buy) - (kwh_saved * tariff_grid_sell)
 
-    # extract 24 hours by month/day mapping
-    def extract_day(series, month, day):
-        base_idx = pd.date_range(datetime(2001, month, day, 0, 0), periods=24, freq="H")
-        mdh_series = series.copy()
-        mdh_series.index = mdh_series.index.strftime("%m-%d %H:%M")
-        keys = base_idx.strftime("%m-%d %H:%M")
-        vals = [mdh_series.get(k, 0.0) for k in keys]
-        return pd.Series(vals, index=base_idx)
+            invest_batt = float(batt_capacity_kwh * capex_batt_kwh)
+            roi_batt = (invest_batt / gain_net_batt) if gain_net_batt > 0 else 99.0
 
-    pv_day = extract_day(pv_ts, month, day)
-    cons_day = extract_day(cons_ts, month, day)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Tx Autoconso", f"{taux_autoconso_batt:.1f} %", delta=f"+{(taux_autoconso_batt - taux_autoconso_pv):.1f}")
+            c2.metric("Tx Autoprod", f"{taux_autoprod_batt:.1f} %", delta=f"+{(taux_autoprod_batt - taux_autoprod_pv):.1f}")
+            c3.metric("Énergie Sauvée", f"{kwh_saved:,.0f} kWh")
 
-    # energy flows (simple, no BESS)
-    self_consumed = np.minimum(pv_day, cons_day)
-    exported = np.maximum(0, pv_day - cons_day)
-    imported = np.maximum(0, cons_day - pv_day)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Investissement Batt.", f"{invest_batt:,.0f} CHF")
+            c2.metric("Gain Net (Delta)", f"{gain_net_batt:,.0f} CHF/an")
+            c3.metric("Retour Invest.", f"{roi_batt:.1f} ans")
 
-    # plotly figure
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=pv_day.index.hour, y=pv_day.values, name="Production PV (kW)",
-                             line=dict(color=COLORS["pv"], width=2), fill='tozeroy', fillcolor=COLORS["pv"]))
-    fig.add_trace(go.Scatter(x=cons_day.index.hour, y=cons_day.values, name="Consommation (kW)",
-                             line=dict(color=COLORS["load"], width=2)))
-    fig.update_layout(
-        xaxis=dict(title="Heure (h)", tickmode='linear', dtick=1),
-        yaxis=dict(title="Puissance (kW)"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=20, t=30, b=40),
-        template="plotly_white",
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.markdown("---")
 
-with right:
-    st.subheader("Indicateurs — 24h sélectionnées")
-    total_pv = pv_day.sum()
-    total_load = cons_day.sum()
-    E_self = self_consumed.sum()
-    E_export = exported.sum()
-    E_import = imported.sum()
+        # --- C. Optimisation
+        st.subheader("C. Optimisation Dimensionnement")
 
-    st.metric("Production PV totale (kWh)", f"{total_pv:.1f}")
-    st.metric("Consommation totale (kWh)", f"{total_load:.1f}")
-    st.metric("Autoconsommation (kWh)", f"{E_self:.1f}")
+        optim_strategy = st.radio(
+            "Stratégie :",
+            (
+                "Batterie optimale pour maximiser l'autoproduction",
+                "Gain financier maximal sur la durée de vie du projet",
+                "Temps de retour le plus court",
+            ),
+            horizontal=True,
+        )
 
-    st.markdown("### Répartition de l'énergie (PV)")
-    pie1 = px.pie(values=[E_self, E_export], names=["Autoconsommée", "Exportée"],
-                  color_discrete_sequence=[COLORS["pv"], COLORS["grid_export"]])
-    pie1.update_traces(textinfo='percent+label')
-    st.plotly_chart(pie1, use_container_width=True, height=260)
+        if st.button("Lancer l'optimisation"):
+            with st.spinner("Calcul en cours..."):
+                best_score = -1e30
+                best_cap = 0.0
+                best = {}
 
-    st.markdown("### Source d'énergie pour la consommation (24h)")
-    pie2 = px.pie(values=[E_self, E_import], names=["PV (auto)", "Réseau (import)"],
-                  color_discrete_sequence=[COLORS["pv"], COLORS["grid_import"]])
-    pie2.update_traces(textinfo='percent+label')
-    st.plotly_chart(pie2, use_container_width=True, height=260)
+                # Plage test (heuristique)
+                avg_daily = total_load / 365.0 if total_load > 0 else 0.0
+                max_cap = max(10.0, avg_daily * 2.0)
+                caps_to_test = np.linspace(5.0, max_cap, 30)
 
-st.markdown("---")
-st.write("Notes :")
-st.write("- Les années sont synthétiques : on n'utilise que le jour+mois+heure pour comparer.")
-st.write("- Les CSV importés sont interprétés en ignorant l'année : seules les combinaisons jour+mois+heure sont utilisées.")
-st.write("- Tilt correction : inclinaison < 7° → -5% ; 7°–35° → 0% ; >35° → -7%")
-st.write("- Les templates PV (125 kW) sont chargés depuis `pvsyst_125_sud.CSV` et `pvsyst_125_est_ouest.CSV` si présents.")
+                for cap in caps_to_test:
+                    r = simulate_energy_flow(
+                        data_pv,
+                        data_load,
+                        float(cap),
+                        float(batt_power_kva),
+                        step_hours=step_h,
+                        rte=batt_rte_val,
+                        dod=batt_dod_val,
+                    )
 
-# End of file
+                    autoprod_pct = (r["self_consumed"] / total_load * 100) if total_load > 0 else 0.0
+                    kwh_saved_opt = r["self_consumed"] - autoconso_pv
+                    gain_net_opt = (kwh_saved_opt * tariff_grid_buy) - (kwh_saved_opt * tariff_grid_sell)
+                    inv_opt = float(cap * capex_batt_kwh)
+                    payback_opt = (inv_opt / gain_net_opt) if gain_net_opt > 0 else 1e30
+
+                    cash_net_lifetime = (gain_net_opt * project_lifetime_years) - inv_opt if gain_net_opt > 0 else -1e30
+
+                    if optim_strategy == "Batterie optimale pour maximiser l'autoproduction":
+                        # Option: exiger gain>0 pour éviter batteries non rentables
+                        score = autoprod_pct if gain_net_opt > 0 else -1e30
+
+                    elif optim_strategy == "Gain financier maximal sur la durée de vie du projet":
+                        score = cash_net_lifetime
+
+                    else:  # Temps de retour le plus court
+                        score = (-payback_opt) if gain_net_opt > 0 else -1e30
+
+                    if score > best_score:
+                        best_score = score
+                        best_cap = float(cap)
+                        best = {
+                            "autoprod_pct": autoprod_pct,
+                            "gain_net": gain_net_opt,
+                            "invest": inv_opt,
+                            "payback": payback_opt,
+                            "cash_net_lifetime": cash_net_lifetime,
+                        }
+
+                if best and best["gain_net"] > 0:
+                    st.success(f"Batterie optimale : {best_cap:.0f} kWh")
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Capacité Optimale", f"{best_cap:.0f} kWh")
+                    c2.metric("Temps de Retour", f"{best['payback']:.1f} ans")
+                    c3.metric("Autoproduction", f"{best['autoprod_pct']:.1f} %")
+
+                    st.caption(
+                        f"Investissement : {best['invest']:,.0f} CHF | "
+                        f"Gain net annuel : {best['gain_net']:,.0f} CHF/an | "
+                        f"Cash net sur {project_lifetime_years} ans : {best['cash_net_lifetime']:,.0f} CHF"
+                    )
+                else:
+                    st.warning("Aucune batterie rentable trouvée (gain net annuel ≤ 0).")
