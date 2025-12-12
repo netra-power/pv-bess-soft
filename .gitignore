@@ -1,0 +1,23 @@
+# Virtualenv
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE (PyCharm)
+.idea/
+*.iml
+
+# Streamlit
+.streamlit/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
