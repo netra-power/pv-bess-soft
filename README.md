@@ -1,10 +1,14 @@
-# BESS Revenue Calculator
+# PV + BESS — Calculateur Streamlit (Autoconsommation)
 
-Outil Streamlit pour calculer les revenus générés par un système de stockage d'énergie (BESS).
+Application Streamlit pour analyser :
+- PV seul : autoconsommation, autoproduction, gains annuels, temps de retour
+- PV + batterie : énergie sauvée (énergie restituée utile), gain net annuel, temps de retour
+- Dimensionnement optimal batterie via 3 stratégies d’optimisation
 
-## Lancement en local
-pip install -r requirements.txt
-streamlit run streamlit_app.py
+## Pré-requis
+- Python 3.13+ recommandé
+- `virtualenv`
 
-## Déploiement
-Dépôt prêt pour déploiement sur Streamlit Cloud.
+## Installation
+
+### 1) Cloner le dépôt
