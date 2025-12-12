@@ -8,7 +8,3 @@ Application Streamlit pour analyser :
 ## Pré-requis
 - Python 3.13+ recommandé
 - `virtualenv`
-
-## Installation
-
-### 1) Cloner le dépôt
